@@ -157,15 +157,17 @@
                                                 </div>
                                                 <span className="font-bold text-2xl text-blue-600">{peopleAhead} <span className="text-sm font-normal text-gray-500">人</span></span>
                                             </div>
-                                            {peopleAhead > 0 && (
-                                                <div className="flex items-center justify-between text-gray-600 bg-white p-4 rounded-lg shadow-sm border border-gray-100">
-                                                    <div className="flex items-center space-x-2">
-                                                        <ClockIcon />
-                                                        <span>預估等候</span>
-                                                    </div>
-                                                    <span className="font-bold text-2xl text-orange-500">{peopleAhead * (data.timePerPerson || 5)} <span className="text-sm font-normal text-gray-500">分鐘</span></span>
+                                            
+                                            <div className="flex items-center justify-between text-gray-600 bg-white p-4 rounded-lg shadow-sm border border-gray-100">
+                                                <div className="flex items-center space-x-2">
+                                                    <ClockIcon />
+                                                    <span>預估等候</span>
                                                 </div>
-                                            )}
+                                                {/* 將計算公式改為 (peopleAhead + 1)，並移除大於0才顯示的限制 */}
+                                                <span className="font-bold text-2xl text-orange-500">
+                                                    {(peopleAhead + 1) * (data.timePerPerson || 5)} <span className="text-sm font-normal text-gray-500">分鐘</span>
+                                                </span>
+                                            </div>
                                         </div>
                                     )}
                                 </div>
@@ -181,11 +183,15 @@
             const [password, setPassword] = useState('');
             const [loginError, setLoginError] = useState('');
             const [showResetConfirm, setShowResetConfirm] = useState(false);
+            const [resetPassword, setResetPassword] = useState('');
+            const [resetError, setResetError] = useState('');
+
+            // 將密碼統一抽出來變數管理
+            const ADMIN_PASSWORD = 'nab063037981';
 
             const handleLogin = (e) => {
                 e.preventDefault();
-                // 將這裡的 '1234' 修改為您想要的任何密碼字串，例如 '8888'
-                if (password === '8888') {
+                if (password === ADMIN_PASSWORD) {
                     setIsAuthenticated(true);
                     setLoginError('');
                 } else {
@@ -209,6 +215,22 @@
             const resetSystem = () => {
                 updateData(DEFAULT_STATE);
                 setShowResetConfirm(false);
+                setResetPassword('');
+                setResetError('');
+            };
+
+            const handleResetConfirm = () => {
+                if (resetPassword === ADMIN_PASSWORD) {
+                    resetSystem();
+                } else {
+                    setResetError('密碼錯誤，無法重置');
+                }
+            };
+
+            const cancelReset = () => {
+                setShowResetConfirm(false);
+                setResetPassword('');
+                setResetError('');
             };
 
             const handleTimeChange = (e) => {
@@ -264,12 +286,23 @@
                         </div>
 
                         {showResetConfirm && (
-                            <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-lg flex justify-between items-center fade-in">
-                                <span className="text-red-700 font-bold">確定要重置系統嗎？所有排隊資料將被清除。</span>
-                                <div className="space-x-3">
-                                    <button onClick={() => setShowResetConfirm(false)} className="px-4 py-2 bg-gray-200 text-gray-800 rounded hover:bg-gray-300 transition">取消</button>
-                                    <button onClick={resetSystem} className="px-4 py-2 bg-red-600 text-white rounded hover:bg-red-700 transition">確定重置</button>
+                            <div className="mb-6 p-6 bg-red-50 border border-red-200 rounded-lg fade-in">
+                                <h3 className="text-red-700 font-bold text-lg mb-2">⚠ 危險操作：重置系統</h3>
+                                <p className="text-red-600 mb-4">確定要重置系統嗎？所有排隊資料將被清除且無法復原。請輸入管理員密碼以確認：</p>
+                                <div className="flex flex-col sm:flex-row items-start sm:items-center space-y-3 sm:space-y-0 sm:space-x-3">
+                                    <input 
+                                        type="password" 
+                                        value={resetPassword}
+                                        onChange={(e) => setResetPassword(e.target.value)}
+                                        placeholder="請輸入密碼"
+                                        className="border border-red-300 rounded py-2 px-3 focus:outline-none focus:ring-2 focus:ring-red-500"
+                                    />
+                                    <div className="flex space-x-3">
+                                        <button onClick={cancelReset} className="px-4 py-2 bg-gray-200 text-gray-800 rounded hover:bg-gray-300 transition">取消</button>
+                                        <button onClick={handleResetConfirm} className="px-4 py-2 bg-red-600 text-white rounded hover:bg-red-700 transition">確認重置</button>
+                                    </div>
                                 </div>
+                                {resetError && <p className="text-red-600 text-sm mt-2 font-medium">{resetError}</p>}
                             </div>
                         )}
 
@@ -390,9 +423,19 @@
                             <span className="bg-blue-600 text-white p-1 rounded">Q</span>
                             <span>排隊系統</span>
                         </div>
-                        <span className="text-xs text-gray-400 bg-gray-100 px-2 py-1 rounded">
-                            {currentView === 'admin' ? '管理員模式' : '即時進度'}
-                        </span>
+                        
+                        <div>
+                            {currentView === 'admin' ? (
+                                <span className="text-xs text-gray-500 bg-gray-100 px-3 py-1.5 rounded">管理員模式</span>
+                            ) : (
+                                <button 
+                                    onClick={() => setCurrentView('admin')}
+                                    className="text-xs text-gray-500 bg-gray-100 hover:bg-gray-200 px-3 py-1.5 rounded transition cursor-pointer"
+                                >
+                                    管理員登入
+                                </button>
+                            )}
+                        </div>
                     </nav>
                     <main className="flex-grow">
                         {content}
