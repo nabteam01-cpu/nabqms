@@ -65,7 +65,6 @@
             console.error("雲端連線初始化失敗:", e);
         }
 
-        // 瀏覽器原生 Web Audio API 提示音合成器（不需外部音檔）
         const playBeepSound = (type = 'ding') => {
             try {
                 const AudioContext = window.AudioContext || window.webkitAudioContext;
