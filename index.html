@@ -41,12 +41,10 @@
                     const stored = localStorage.getItem(STORAGE_KEY);
                     if (stored) {
                         const parsed = JSON.parse(stored);
-                        // 確保包含所有必要屬性，避免舊資料結構缺失導致地圖(map)迴圈閃退
                         return { ...DEFAULT_STATE, ...parsed };
                     }
                     return DEFAULT_STATE;
                 } catch (error) {
-                    console.warn("無法存取 localStorage (可能處於沙盒或無痕模式)，系統將以單一視窗模式運行。", error);
                     return DEFAULT_STATE;
                 }
             });
@@ -67,19 +65,29 @@
                 return () => window.removeEventListener('storage', handleStorageChange);
             }, []);
 
-            // 更新資料並寫入 localStorage 通知其他分頁
-            const updateData = useCallback((newData) => {
-                const updatedState = typeof newData === 'function' ? newData(data) : newData;
-                setData(updatedState);
-                try {
-                    localStorage.setItem(STORAGE_KEY, JSON.stringify(updatedState));
-                } catch (error) {
-                    // 若無權限寫入 (如預覽環境)，則忽略，仍可維持當前畫面的運作
-                    console.warn("無法寫入狀態至 localStorage", error);
-                }
-                // 為了讓同一個分頁也能觸發更新，手動派發事件
-                window.dispatchEvent(new Event('local-storage-sync'));
-            }, [data]);
+            // 更新資料並寫入 localStorage 通知其他分頁 (升級：強制取得最新真實狀態)
+            const updateData = useCallback((updater) => {
+                setData(prevLocalState => {
+                    // 1. 強制從 localStorage 抓取「絕對最新狀態」，消滅多視窗時間差
+                    let latestState = prevLocalState;
+                    try {
+                        const stored = localStorage.getItem(STORAGE_KEY);
+                        if (stored) {
+                            latestState = { ...DEFAULT_STATE, ...JSON.parse(stored) };
+                        }
+                    } catch(e) {}
+
+                    // 2. 確保使用最新狀態計算下一號
+                    const nextState = typeof updater === 'function' ? updater(latestState) : updater;
+                    
+                    // 3. 立即寫回底層
+                    try {
+                        localStorage.setItem(STORAGE_KEY, JSON.stringify(nextState));
+                    } catch (error) {}
+                    
+                    return nextState;
+                });
+            }, []);
 
             return [data, updateData];
         }
@@ -95,16 +103,45 @@
         );
 
         function PublicView({ data, updateData, setCurrentView }) {
-            const [myNumber, setMyNumber] = useState(null);
+            // 修改點 1：從 localStorage 讀取個人號碼，防止重整或關閉視窗後號碼消失
+            const [myNumber, setMyNumber] = useState(() => {
+                try {
+                    const saved = localStorage.getItem('my_queue_number');
+                    return saved ? parseInt(saved, 10) : null;
+                } catch (e) {
+                    return null;
+                }
+            });
 
+            // 修改點 2：監控系統重置。如果管理員重置了系統 (lastIssued 歸零)，連帶清除民眾手上的號碼
+            useEffect(() => {
+                if (myNumber !== null && data.lastIssued === 0) {
+                    setMyNumber(null);
+                    try {
+                        localStorage.removeItem('my_queue_number');
+                    } catch (e) {}
+                }
+            }, [data.lastIssued, myNumber]);
+
+            // 升級：取號邏輯改為在安全閉包內計算
             const handleJoinQueue = () => {
-                const newNumber = data.lastIssued + 1;
-                updateData(prev => ({
-                    ...prev,
-                    lastIssued: newNumber,
-                    waitingList: [...prev.waitingList, newNumber]
-                }));
-                setMyNumber(newNumber);
+                let assignedNumber = null;
+                updateData(prev => {
+                    assignedNumber = prev.lastIssued + 1;
+                    return {
+                        ...prev,
+                        lastIssued: assignedNumber,
+                        waitingList: [...prev.waitingList, assignedNumber]
+                    };
+                });
+                
+                // 派發號碼給使用者
+                if (assignedNumber !== null) {
+                    setMyNumber(assignedNumber);
+                    try {
+                        localStorage.setItem('my_queue_number', assignedNumber);
+                    } catch (e) {}
+                }
             };
 
             const peopleAhead = myNumber ? Math.max(0, myNumber - data.currentNumber - 1) : 0;
@@ -199,17 +236,21 @@
                 }
             };
 
+            // 升級：呼叫下一位邏輯改為安全閉包內計算
             const callNext = () => {
-                if (data.waitingList.length === 0) return;
-                
-                const nextNumber = data.waitingList[0];
-                const newWaitingList = data.waitingList.slice(1);
-                
-                updateData(prev => ({
-                    ...prev,
-                    currentNumber: nextNumber,
-                    waitingList: newWaitingList
-                }));
+                updateData(prev => {
+                    // 防呆：如果等候名單為空，不改變狀態
+                    if (prev.waitingList.length === 0) return prev;
+                    
+                    const nextNumber = prev.waitingList[0];
+                    const newWaitingList = prev.waitingList.slice(1);
+                    
+                    return {
+                        ...prev,
+                        currentNumber: nextNumber,
+                        waitingList: newWaitingList
+                    };
+                });
             };
 
             const resetSystem = () => {
