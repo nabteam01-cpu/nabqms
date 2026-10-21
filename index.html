@@ -27,7 +27,7 @@
         import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js';
         import { getFirestore, doc, getDoc, setDoc, onSnapshot } from 'https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js';
 
-        const { useState, useEffect, useCallback } = React;
+        const { useState, useEffect, useCallback, useRef } = React;
 
         const DEFAULT_STATE = {
             currentNumber: 0,
@@ -35,7 +35,7 @@
             lastIssued: 0,
             timePerPerson: 5,
             maxLimit: 100,
-            userTickets: {} // 記錄 UID 對應的號碼
+            userTickets: {} 
         };
 
         let app, auth, db;
@@ -65,7 +65,42 @@
             console.error("雲端連線初始化失敗:", e);
         }
 
-        // 自訂 Hook：跨裝置雲端資料同步與身分綁定
+        // 瀏覽器原生 Web Audio API 提示音合成器（不需外部音檔）
+        const playBeepSound = (type = 'ding') => {
+            try {
+                const AudioContext = window.AudioContext || window.webkitAudioContext;
+                if (!AudioContext) return;
+                const ctx = new AudioContext();
+                
+                const osc = ctx.createOscillator();
+                const gain = ctx.createGain();
+                osc.connect(gain);
+                gain.connect(ctx.destination);
+
+                if (type === 'ding') {
+                    // 清脆的提醒登登聲
+                    osc.type = 'sine';
+                    osc.frequency.setValueAtTime(587.33, ctx.currentTime); // D5
+                    osc.frequency.setValueAtTime(880, ctx.currentTime + 0.15); // A5
+                    gain.gain.setValueAtTime(0.3, ctx.currentTime);
+                    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.6);
+                    osc.start();
+                    osc.stop(ctx.currentTime + 0.6);
+                } else if (type === 'alert') {
+                    // 叫號提示音
+                    osc.type = 'triangle';
+                    osc.frequency.setValueAtTime(440, ctx.currentTime);
+                    osc.frequency.setValueAtTime(660, ctx.currentTime + 0.2);
+                    gain.gain.setValueAtTime(0.4, ctx.currentTime);
+                    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.5);
+                    osc.start();
+                    osc.stop(ctx.currentTime + 0.5);
+                }
+            } catch(e) {
+                console.log("音效播放受阻:", e);
+            }
+        };
+
         function useQueueData() {
             const [data, setData] = useState(DEFAULT_STATE);
             const [user, setUser] = useState(null);
@@ -150,8 +185,8 @@
 
         function PublicView({ data, updateData, user }) {
             const userId = user ? user.uid : 'guest';
-            
-            // 優先從雲端記錄對應的號碼，若無則備份查詢本機快取
+            const prevCurrentNumRef = useRef(data.currentNumber);
+
             const myNumber = (data.userTickets && data.userTickets[userId]) 
                 ? data.userTickets[userId] 
                 : (() => {
@@ -161,13 +196,23 @@
                     } catch(e) { return null; }
                 })();
 
-            const handleJoinQueue = async () => {
-                // 防呆：如果已經有號碼且尚未過號，嚴格禁止再次取號
-                if (myNumber !== null && data.currentNumber <= myNumber) return;
+            const isPassed = myNumber !== null && data.currentNumber > myNumber;
+            const isMyTurn = myNumber !== null && data.currentNumber === myNumber;
 
+            // 當輪到該使用者時，自動觸發提示音
+            useEffect(() => {
+                if (isMyTurn && prevCurrentNumRef.current !== data.currentNumber) {
+                    playBeepSound('ding');
+                }
+                prevCurrentNumRef.current = data.currentNumber;
+            }, [isMyTurn, data.currentNumber]);
+
+            const handleJoinQueue = async () => {
+                if (myNumber !== null && !isPassed) return;
+
+                playBeepSound('alert');
                 await updateData(prev => {
                     const currentTickets = prev.userTickets || {};
-                    // 二次防呆：檢查伺服器端該身分是否已有未過號的號碼
                     if (currentTickets[userId] && prev.currentNumber <= currentTickets[userId]) {
                         return prev;
                     }
@@ -190,10 +235,8 @@
                 });
             };
 
-            const isPassed = myNumber !== null && data.currentNumber > myNumber;
-            const canTakeTicket = myNumber === null || isPassed; // 只有在「從未取號」或「已經過號」時才能取號
+            const canTakeTicket = myNumber === null || isPassed;
             const peopleAhead = myNumber && !isPassed ? Math.max(0, myNumber - data.currentNumber - 1) : 0;
-            const isMyTurn = myNumber !== null && data.currentNumber === myNumber;
             const isFull = data.maxLimit > 0 && data.lastIssued >= data.maxLimit;
 
             return (
@@ -233,7 +276,7 @@
                                     {isMyTurn ? (
                                         <div className="bg-green-100 text-green-700 p-4 rounded-xl flex items-center justify-center space-x-2 animate-bounce border border-green-200">
                                             <BellIcon />
-                                            <span className="font-bold text-lg">輪到您了！請在5分鐘內前往櫃檯</span>
+                                            <span className="font-bold text-lg">輪到您了！請前往櫃檯</span>
                                         </div>
                                     ) : (
                                         <div className="flex flex-col space-y-3">
@@ -291,6 +334,7 @@
             };
 
             const callNext = async () => {
+                playBeepSound('ding');
                 await updateData(prev => {
                     if (prev.waitingList.length === 0) return prev;
                     const nextNumber = prev.waitingList[0];
