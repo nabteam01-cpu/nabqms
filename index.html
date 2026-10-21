@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+6<!DOCTYPE html>
 <html lang="zh-TW">
 <head>
     <meta charset="UTF-8">
@@ -33,20 +33,18 @@
             currentNumber: 0,
             waitingList: [],
             lastIssued: 0,
-            timePerPerson: 5
+            timePerPerson: 5,
+            maxLimit: 100,
+            userTickets: {} // 記錄各個使用者 UID 對應的號碼，防止重複取號
         };
 
-        // 初始化雲端資料庫連線
         let app, auth, db;
         const appId = typeof __app_id !== 'undefined' ? __app_id : 'queue-system-app';
 
         try {
-            // 1. 優先使用預覽環境的設定（保留這行讓您在此處還能測試）
             let firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
             
-            // 2. 當您上傳到 GitHub 時，請把您申請的 Firebase 設定取消註解並貼在下方：
             if (!firebaseConfig) {
-                
                 firebaseConfig = {
                     apiKey: "AIzaSyBmsDrnT8UqXqXXF4iEEjQK3hrL5edLpLo",
                     authDomain: "nabqms.firebaseapp.com",
@@ -56,7 +54,6 @@
                     appId: "1:224756645160:web:f08122d8c9334ff6fce41d",
                     measurementId: "G-YR8P3QJ7BW"
                 };
-                
             }
 
             if (firebaseConfig) {
@@ -68,13 +65,11 @@
             console.error("雲端連線初始化失敗:", e);
         }
 
-        // 自訂 Hook：跨裝置雲端資料同步核心
         function useQueueData() {
             const [data, setData] = useState(DEFAULT_STATE);
             const [user, setUser] = useState(null);
             const [isOffline, setIsOffline] = useState(false);
 
-            // 1. 確保雲端身分驗證
             useEffect(() => {
                 if (!auth) {
                     setIsOffline(true);
@@ -97,25 +92,6 @@
                 return () => unsubscribe();
             }, []);
 
-            // 本地儲存備援機制：當雲端被擋時，改用同設備跨分頁同步
-            useEffect(() => {
-                if (!isOffline) return;
-                
-                const localData = localStorage.getItem('local_queue_state');
-                if (localData) {
-                    try { setData({ ...DEFAULT_STATE, ...JSON.parse(localData) }); } catch(e) {}
-                }
-                
-                const handleStorage = (e) => {
-                    if (e.key === 'local_queue_state' && e.newValue) {
-                        try { setData({ ...DEFAULT_STATE, ...JSON.parse(e.newValue) }); } catch(e) {}
-                    }
-                };
-                window.addEventListener('storage', handleStorage);
-                return () => window.removeEventListener('storage', handleStorage);
-            }, [isOffline]);
-
-            // 2. 即時監聽雲端資料庫
             useEffect(() => {
                 if (!db || !user || isOffline) return;
                 
@@ -130,19 +106,17 @@
                         });
                     }
                 }, (error) => {
-                    console.error("即時監聽中斷 (通常是被防火牆阻擋)，降級為單機模式", error);
+                    console.error("即時監聽中斷", error);
                     setIsOffline(true);
                 });
 
                 return () => unsubscribe();
             }, [user, isOffline]);
 
-            // 3. 安全更新資料 (自動判斷雲端或單機)
             const updateData = useCallback(async (updater) => {
                 if (isOffline || !db || !user) {
                     setData(prev => {
                         const nextState = typeof updater === 'function' ? updater(prev) : updater;
-                        localStorage.setItem('local_queue_state', JSON.stringify(nextState));
                         return nextState;
                     });
                     return;
@@ -153,20 +127,14 @@
                     const snap = await getDoc(docRef);
                     const latestState = snap.exists() ? { ...DEFAULT_STATE, ...snap.data() } : DEFAULT_STATE;
                     const nextState = typeof updater === 'function' ? updater(latestState) : updater;
-                    
                     await setDoc(docRef, nextState);
                 } catch (e) {
-                    console.error("資料上傳失敗 (權限不足)，自動降級", e);
+                    console.error("資料上傳失敗", e);
                     setIsOffline(true);
-                    setData(prev => {
-                        const nextState = typeof updater === 'function' ? updater(prev) : updater;
-                        localStorage.setItem('local_queue_state', JSON.stringify(nextState));
-                        return nextState;
-                    });
                 }
             }, [user, isOffline]);
 
-            return [data, updateData, isOffline];
+            return [data, updateData, isOffline, user];
         }
 
         const UsersIcon = () => (
@@ -179,50 +147,46 @@
             <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
         );
 
-        function PublicView({ data, updateData }) {
-            const [myNumber, setMyNumber] = useState(() => {
-                try {
-                    const saved = localStorage.getItem('my_queue_number');
-                    return saved ? parseInt(saved, 10) : null;
-                } catch (e) { return null; }
-            });
+        function PublicView({ data, updateData, user }) {
+            const userId = user ? user.uid : 'guest';
+            const myNumber = (data.userTickets && data.userTickets[userId]) ? data.userTickets[userId] : null;
 
-            // 監聽重置
-            useEffect(() => {
-                if (myNumber !== null && data.lastIssued === 0) {
-                    setMyNumber(null);
-                    try { localStorage.removeItem('my_queue_number'); } catch (e) {}
-                }
-            }, [data.lastIssued, myNumber]);
-
-            // 升級非同步取號，等待雲端回應
             const handleJoinQueue = async () => {
-                let assignedNumber = null;
+                if (myNumber) return; // 已經取過號，直接返回不重複發放
+
                 await updateData(prev => {
-                    assignedNumber = prev.lastIssued + 1;
+                    const currentTickets = prev.userTickets || {};
+                    if (currentTickets[userId]) return prev; // 再次防範並發請求重複取號
+
+                    // 檢查是否達到上限
+                    if (prev.maxLimit > 0 && prev.lastIssued >= prev.maxLimit) {
+                        return prev;
+                    }
+
+                    const assignedNumber = prev.lastIssued + 1;
                     return {
                         ...prev,
                         lastIssued: assignedNumber,
-                        waitingList: [...prev.waitingList, assignedNumber]
+                        waitingList: [...prev.waitingList, assignedNumber],
+                        userTickets: {
+                            ...currentTickets,
+                            [userId]: assignedNumber
+                        }
                     };
                 });
-                
-                if (assignedNumber !== null) {
-                    setMyNumber(assignedNumber);
-                    try { localStorage.setItem('my_queue_number', assignedNumber); } catch (e) {}
-                }
             };
 
             const peopleAhead = myNumber ? Math.max(0, myNumber - data.currentNumber - 1) : 0;
             const isMyTurn = myNumber !== null && data.currentNumber === myNumber;
             const isPassed = myNumber !== null && data.currentNumber > myNumber;
+            const isFull = data.maxLimit > 0 && data.lastIssued >= data.maxLimit;
 
             return (
                 <div className="min-h-screen flex flex-col items-center justify-center p-4 fade-in bg-gray-50">
                     <div className="w-full max-w-md bg-white rounded-2xl shadow-xl overflow-hidden border border-gray-100">
                         <div className="bg-blue-600 text-white p-6 text-center">
                             <h2 className="text-2xl font-bold">即時叫號進度</h2>
-                            <p className="text-blue-100 mt-1 text-sm">您可隨時離開，並透過此頁面查看進度</p>
+                            <p className="text-blue-100 mt-1 text-sm">您可隨時離開，重整網頁號碼不變</p>
                         </div>
                         
                         <div className="p-8 text-center">
@@ -231,13 +195,19 @@
                                 {data.currentNumber === 0 ? '--' : data.currentNumber}
                             </div>
 
-                            {!myNumber && (
+                            {!myNumber && !isFull && (
                                 <button 
                                     onClick={handleJoinQueue}
                                     className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-4 px-8 rounded-full shadow-lg transition transform hover:scale-105"
                                 >
                                     取號排隊
                                 </button>
+                            )}
+
+                            {!myNumber && isFull && (
+                                <div className="bg-amber-50 border border-amber-200 text-amber-700 p-4 rounded-xl font-bold">
+                                    今日取號已額滿
+                                </div>
                             )}
 
                             {myNumber !== null && (
@@ -252,7 +222,7 @@
                                         </div>
                                     ) : isPassed ? (
                                         <div className="bg-red-50 text-red-700 p-4 rounded-xl border border-red-100">
-                                            <span className="font-bold">您的號碼已過號，請重新取號或洽詢櫃檯。</span>
+                                            <span className="font-bold">您的號碼已過號，請重新整理或洽詢櫃檯。</span>
                                         </div>
                                     ) : (
                                         <div className="flex flex-col space-y-3">
@@ -291,7 +261,7 @@
             const [resetPassword, setResetPassword] = useState('');
             const [resetError, setResetError] = useState('');
 
-            const ADMIN_PASSWORD = 'nab063037981'; // 管理員密碼
+            const ADMIN_PASSWORD = 'nab063037981';
 
             const handleLogin = (e) => {
                 e.preventDefault();
@@ -476,7 +446,6 @@
                                 <div className="flex-1 overflow-y-auto max-h-[350px] pr-2 custom-scrollbar">
                                     {data.waitingList.length === 0 ? (
                                         <div className="h-full flex flex-col items-center justify-center text-gray-400 py-10">
-                                            <svg className="w-16 h-16 mb-4 text-gray-200" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-2.586a1 1 0 00-.707.293l-2.414 2.414a1 1 0 01-.707.293h-3.172a1 1 0 01-.707-.293l-2.414-2.414A1 1 0 006.586 13H4"></path></svg>
                                             <p className="font-medium">目前無人等候</p>
                                         </div>
                                     ) : (
@@ -500,7 +469,7 @@
 
         function App() {
             const [currentView, setCurrentView] = useState('public');
-            const [data, updateData, isOffline] = useQueueData();
+            const [data, updateData, isOffline, user] = useQueueData();
 
             let content;
             switch (currentView) {
@@ -509,7 +478,7 @@
                     break;
                 case 'public':
                 default:
-                    content = <PublicView data={data} updateData={updateData} />;
+                    content = <PublicView data={data} updateData={updateData} user={user} />;
             }
 
             return (
