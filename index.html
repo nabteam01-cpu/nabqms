@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>即時雲端排隊叫號系統</title>
+    
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    
+    <style>
+        body { font-family: 'Inter', sans-serif; background-color: #f3f4f6; }
+        .fade-in { animation: fadeIn 0.3s ease-in-out; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        .pulse-number { animation: pulse 2s infinite; }
+        @keyframes pulse { 0% { transform: scale(1); } 50% { transform: scale(1.05); } 100% { transform: scale(1); } }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useCallback } = React;
+
+        const DEFAULT_STATE = {
+            currentNumber: 0,
+            waitingList: [],
+            lastIssued: 0,
+            timePerPerson: 5 // 新增：預設每人平均處理時間（分鐘）
+        };
+
+        const STORAGE_KEY = 'queue_system_state';
+
+        // 自訂 Hook：用來同步跨分頁的資料 (已加入防錯與防護機制)
+        function useQueueData() {
+            const [data, setData] = useState(() => {
+                try {
+                    const stored = localStorage.getItem(STORAGE_KEY);
+                    if (stored) {
+                        const parsed = JSON.parse(stored);
+                        // 確保包含所有必要屬性，避免舊資料結構缺失導致地圖(map)迴圈閃退
+                        return { ...DEFAULT_STATE, ...parsed };
+                    }
+                    return DEFAULT_STATE;
+                } catch (error) {
+                    console.warn("無法存取 localStorage (可能處於沙盒或無痕模式)，系統將以單一視窗模式運行。", error);
+                    return DEFAULT_STATE;
+                }
+            });
+
+            // 監聽 localStorage 改變 (當其他分頁更新時觸發)
+            useEffect(() => {
+                const handleStorageChange = (e) => {
+                    if (e.key === STORAGE_KEY && e.newValue) {
+                        try {
+                            const parsed = JSON.parse(e.newValue);
+                            setData({ ...DEFAULT_STATE, ...parsed });
+                        } catch (err) {
+                            console.error("解析跨分頁資料失敗", err);
+                        }
+                    }
+                };
+                window.addEventListener('storage', handleStorageChange);
+                return () => window.removeEventListener('storage', handleStorageChange);
+            }, []);
+
+            // 更新資料並寫入 localStorage 通知其他分頁
+            const updateData = useCallback((newData) => {
+                const updatedState = typeof newData === 'function' ? newData(data) : newData;
+                setData(updatedState);
+                try {
+                    localStorage.setItem(STORAGE_KEY, JSON.stringify(updatedState));
+                } catch (error) {
+                    // 若無權限寫入 (如預覽環境)，則忽略，仍可維持當前畫面的運作
+                    console.warn("無法寫入狀態至 localStorage", error);
+                }
+                // 為了讓同一個分頁也能觸發更新，手動派發事件
+                window.dispatchEvent(new Event('local-storage-sync'));
+            }, [data]);
+
+            return [data, updateData];
+        }
+
+        const UsersIcon = () => (
+            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+        );
+        const BellIcon = () => (
+            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+        );
+        const ClockIcon = () => (
+            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+        );
+
+        function PublicView({ data, updateData, setCurrentView }) {
+            const [myNumber, setMyNumber] = useState(null);
+
+            const handleJoinQueue = () => {
+                const newNumber = data.lastIssued + 1;
+                updateData(prev => ({
+                    ...prev,
+                    lastIssued: newNumber,
+                    waitingList: [...prev.waitingList, newNumber]
+                }));
+                setMyNumber(newNumber);
+            };
+
+            const peopleAhead = myNumber ? Math.max(0, myNumber - data.currentNumber - 1) : 0;
+            const isMyTurn = myNumber !== null && data.currentNumber === myNumber;
+            const isPassed = myNumber !== null && data.currentNumber > myNumber;
+
+            return (
+                <div className="min-h-screen flex flex-col items-center justify-center p-4 fade-in bg-gray-50">
+                    <div className="w-full max-w-md bg-white rounded-2xl shadow-xl overflow-hidden">
+                        <div className="bg-blue-600 text-white p-6 text-center">
+                            <h2 className="text-2xl font-bold">即時叫號進度</h2>
+                            <p className="text-blue-100 mt-1">您可隨時離開，並透過此頁面查看進度</p>
+                        </div>
+                        
+                        <div className="p-8 text-center">
+                            <p className="text-gray-500 text-lg mb-2">目前服務號碼</p>
+                            <div className="text-7xl font-extrabold text-blue-600 mb-6 pulse-number">
+                                {data.currentNumber === 0 ? '--' : data.currentNumber}
+                            </div>
+
+                            {!myNumber && (
+                                <button 
+                                    onClick={handleJoinQueue}
+                                    className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-4 px-8 rounded-full shadow-lg transition transform hover:scale-105"
+                                >
+                                    取號排隊
+                                </button>
+                            )}
+
+                            {myNumber !== null && (
+                                <div className="mt-8 p-6 bg-gray-50 rounded-xl border border-gray-200">
+                                    <p className="text-gray-600 mb-1">您的號碼是</p>
+                                    <p className="text-5xl font-bold text-gray-800 mb-4">{myNumber}</p>
+                                    
+                                    {isMyTurn ? (
+                                        <div className="bg-green-100 text-green-700 p-4 rounded-lg flex items-center justify-center space-x-2 animate-bounce">
+                                            <BellIcon />
+                                            <span className="font-bold text-lg">輪到您了！請前往櫃檯</span>
+                                        </div>
+                                    ) : isPassed ? (
+                                        <div className="bg-red-100 text-red-700 p-4 rounded-lg">
+                                            <span className="font-bold">您的號碼已過號，請重新取號或洽詢櫃檯。</span>
+                                        </div>
+                                    ) : (
+                                        <div className="flex flex-col space-y-3">
+                                            <div className="flex items-center justify-between text-gray-600 bg-white p-4 rounded-lg shadow-sm border border-gray-100">
+                                                <div className="flex items-center space-x-2">
+                                                    <UsersIcon />
+                                                    <span>前面還有</span>
+                                                </div>
+                                                <span className="font-bold text-2xl text-blue-600">{peopleAhead} <span className="text-sm font-normal text-gray-500">人</span></span>
+                                            </div>
+                                            {peopleAhead > 0 && (
+                                                <div className="flex items-center justify-between text-gray-600 bg-white p-4 rounded-lg shadow-sm border border-gray-100">
+                                                    <div className="flex items-center space-x-2">
+                                                        <ClockIcon />
+                                                        <span>預估等候</span>
+                                                    </div>
+                                                    <span className="font-bold text-2xl text-orange-500">{peopleAhead * (data.timePerPerson || 5)} <span className="text-sm font-normal text-gray-500">分鐘</span></span>
+                                                </div>
+                                            )}
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        function AdminView({ data, updateData, setCurrentView }) {
+            const [isAuthenticated, setIsAuthenticated] = useState(false);
+            const [password, setPassword] = useState('');
+            const [loginError, setLoginError] = useState('');
+            const [showResetConfirm, setShowResetConfirm] = useState(false);
+
+            const handleLogin = (e) => {
+                e.preventDefault();
+                // 將這裡的 '1234' 修改為您想要的任何密碼字串，例如 '8888'
+                if (password === '8888') {
+                    setIsAuthenticated(true);
+                    setLoginError('');
+                } else {
+                    setLoginError('密碼錯誤，請重新輸入');
+                }
+            };
+
+            const callNext = () => {
+                if (data.waitingList.length === 0) return;
+                
+                const nextNumber = data.waitingList[0];
+                const newWaitingList = data.waitingList.slice(1);
+                
+                updateData(prev => ({
+                    ...prev,
+                    currentNumber: nextNumber,
+                    waitingList: newWaitingList
+                }));
+            };
+
+            const resetSystem = () => {
+                updateData(DEFAULT_STATE);
+                setShowResetConfirm(false);
+            };
+
+            const handleTimeChange = (e) => {
+                const newTime = parseInt(e.target.value, 10);
+                if (!isNaN(newTime) && newTime >= 1) {
+                    updateData(prev => ({ ...prev, timePerPerson: newTime }));
+                }
+            };
+
+            if (!isAuthenticated) {
+                return (
+                    <div className="min-h-screen flex items-center justify-center p-4 bg-gray-800 fade-in">
+                        <div className="bg-white p-8 rounded-xl shadow-2xl w-full max-w-sm">
+                            <h2 className="text-2xl font-bold text-center mb-6 text-gray-800">系統管理員登入</h2>
+                            <form onSubmit={handleLogin}>
+                                <div className="mb-4">
+                                    {/* 修改標籤文字，不要把密碼直接寫在提示上 */}
+                                    <label className="block text-gray-700 text-sm font-bold mb-2">管理密碼</label>
+                                    <input 
+                                        type="password" 
+                                        value={password}
+                                        onChange={(e) => setPassword(e.target.value)}
+                                        className="shadow appearance-none border rounded w-full py-3 px-4 text-gray-700 leading-tight focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                        placeholder="請輸入密碼"
+                                    />
+                                    {loginError && <p className="text-red-500 text-xs italic mt-2">{loginError}</p>}
+                                </div>
+                                <button type="submit" className="w-full bg-gray-800 hover:bg-gray-900 text-white font-bold py-3 px-4 rounded focus:outline-none focus:shadow-outline transition">
+                                    登入控制台
+                                </button>
+                            </form>
+                            <div className="mt-4 text-center">
+                                <button onClick={() => setCurrentView('public')} className="text-sm text-gray-500 hover:underline">返回民眾畫面</button>
+                            </div>
+                        </div>
+                    </div>
+                );
+            }
+
+            return (
+                <div className="min-h-screen bg-gray-100 p-6 fade-in">
+                    <div className="max-w-4xl mx-auto">
+                        <div className="flex justify-between items-center mb-8">
+                            <h1 className="text-3xl font-bold text-gray-800">叫號控制台</h1>
+                            <div className="space-x-4">
+                                <button onClick={() => setCurrentView('public')} className="text-gray-500 hover:text-gray-700 font-medium px-4 py-2 border border-transparent rounded hover:bg-gray-200 transition">
+                                    返回民眾畫面
+                                </button>
+                                <button onClick={() => setShowResetConfirm(true)} className="text-red-500 hover:text-red-700 font-medium px-4 py-2 border border-red-500 rounded hover:bg-red-50 transition">
+                                    重置系統
+                                </button>
+                            </div>
+                        </div>
+
+                        {showResetConfirm && (
+                            <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-lg flex justify-between items-center fade-in">
+                                <span className="text-red-700 font-bold">確定要重置系統嗎？所有排隊資料將被清除。</span>
+                                <div className="space-x-3">
+                                    <button onClick={() => setShowResetConfirm(false)} className="px-4 py-2 bg-gray-200 text-gray-800 rounded hover:bg-gray-300 transition">取消</button>
+                                    <button onClick={resetSystem} className="px-4 py-2 bg-red-600 text-white rounded hover:bg-red-700 transition">確定重置</button>
+                                </div>
+                            </div>
+                        )}
+
+                        {/* 新增：系統參數設定區塊 */}
+                        <div className="bg-white rounded-2xl shadow-sm p-6 border border-gray-200 mb-6 flex flex-col sm:flex-row justify-between items-center">
+                            <div className="mb-4 sm:mb-0 text-center sm:text-left">
+                                <h2 className="text-lg font-bold text-gray-800">等候時間設定</h2>
+                                <p className="text-sm text-gray-500">設定每位顧客平均服務時間，供民眾端計算預估等候時間</p>
+                            </div>
+                            <div className="flex items-center space-x-3 bg-gray-50 p-2 rounded-lg border border-gray-200">
+                                <span className="text-gray-700 font-medium">每人平均</span>
+                                <input 
+                                    type="number" 
+                                    min="1" 
+                                    value={data.timePerPerson || 5} 
+                                    onChange={handleTimeChange}
+                                    className="border border-gray-300 rounded w-20 py-1 px-2 text-center focus:outline-none focus:ring-2 focus:ring-blue-500 font-bold"
+                                />
+                                <span className="text-gray-700">分鐘</span>
+                            </div>
+                        </div>
+
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                            {/* 左側：目前狀態與操作 */}
+                            <div className="bg-white rounded-2xl shadow-sm p-8 border border-gray-200">
+                                <h2 className="text-xl text-gray-600 mb-4 text-center">目前正在服務</h2>
+                                <div className="text-8xl font-black text-center text-gray-800 mb-8">
+                                    {data.currentNumber === 0 ? '--' : data.currentNumber}
+                                </div>
+                                <button 
+                                    onClick={callNext}
+                                    disabled={data.waitingList.length === 0}
+                                    className={`w-full py-5 rounded-xl text-xl font-bold text-white shadow-lg transition ${
+                                        data.waitingList.length === 0 
+                                        ? 'bg-gray-400 cursor-not-allowed' 
+                                        : 'bg-green-500 hover:bg-green-600 transform hover:-translate-y-1'
+                                    }`}
+                                >
+                                    呼叫下一位 (Next)
+                                </button>
+                            </div>
+
+                            {/* 右側：等候名單 */}
+                            <div className="bg-white rounded-2xl shadow-sm p-8 border border-gray-200 flex flex-col">
+                                <div className="flex justify-between items-center mb-6">
+                                    <h2 className="text-xl font-bold text-gray-800">現場等候名單</h2>
+                                    <span className="bg-blue-100 text-blue-800 text-sm font-medium px-3 py-1 rounded-full">
+                                        共 {data.waitingList.length} 人
+                                    </span>
+                                </div>
+                                
+                                <div className="flex-1 overflow-y-auto max-h-[300px] pr-2">
+                                    {data.waitingList.length === 0 ? (
+                                        <div className="h-full flex items-center justify-center text-gray-400 italic">
+                                            目前無人等候
+                                        </div>
+                                    ) : (
+                                        <div className="grid grid-cols-3 gap-3">
+                                            {data.waitingList.map((num, idx) => (
+                                                <div key={num} className="bg-gray-50 border border-gray-200 rounded-lg p-3 text-center">
+                                                    <span className="text-sm text-gray-400 block mb-1">順位 {idx + 1}</span>
+                                                    <span className="text-2xl font-bold text-gray-700">{num}</span>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+                        </div>
+                        <div className="mt-8 text-center text-gray-500 text-sm">
+                            💡 提示：請複製本頁面網址至新分頁測試。若要在此預覽環境切換回民眾畫面，請點擊右上方「返回民眾畫面」。
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        function App() {
+            // 預設畫面直接改為 'public' (民眾畫面)
+            const [currentView, setCurrentView] = useState('public');
+            const [data, updateData] = useQueueData();
+            
+            // 隱藏彩蛋計數器
+            const [clickCount, setClickCount] = useState(0);
+
+            // 隱藏的後台入口：快速點擊標題 5 次才會進入管理者畫面
+            const handleSecretClick = () => {
+                const newCount = clickCount + 1;
+                setClickCount(newCount);
+                if (newCount >= 5) {
+                    setCurrentView('admin');
+                    setClickCount(0); // 切換後歸零
+                }
+                // 如果沒有在 2 秒內連續點擊，就重置計數 (防誤觸)
+                setTimeout(() => setClickCount(0), 2000);
+            };
+
+            // 簡易路由渲染 (移除了 HomeView)
+            let content;
+            switch (currentView) {
+                case 'admin':
+                    content = <AdminView data={data} updateData={updateData} setCurrentView={setCurrentView} />;
+                    break;
+                case 'public':
+                default:
+                    content = <PublicView data={data} updateData={updateData} setCurrentView={setCurrentView} />;
+            }
+
+            return (
+                <div className="antialiased text-gray-900 min-h-screen flex flex-col">
+                    <nav className="bg-white shadow-sm px-6 py-3 flex justify-between items-center z-10">
+                        {/* 加入隱藏觸發器 onClick={handleSecretClick} */}
+                        <div 
+                            className="font-bold text-gray-800 flex items-center space-x-2 cursor-pointer select-none"
+                            onClick={handleSecretClick}
+                            title="系統狀態"
+                        >
+                            <span className="bg-blue-600 text-white p-1 rounded">Q</span>
+                            <span>排隊系統</span>
+                        </div>
+                        <span className="text-xs text-gray-400 bg-gray-100 px-2 py-1 rounded">
+                            {currentView === 'admin' ? '管理員模式' : '即時進度'}
+                        </span>
+                    </nav>
+                    <main className="flex-grow">
+                        {content}
+                    </main>
+                </div>
+            );
+        }
+
+        // 渲染 React 應用
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
